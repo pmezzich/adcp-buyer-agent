@@ -1,0 +1,20 @@
+# Overlay applied on top of salesagent's docker-compose.e2e.yml + docker-compose.e2e.ports.yml
+# whenever this project drives the seller.
+#
+# Usage (from the salesagent repo root):
+#   docker compose -f docker-compose.e2e.yml -f docker-compose.e2e.ports.yml \
+#                  -f <this file> up -d postgres adcp-server proxy
+#
+# Both variables below are read at MODULE IMPORT time inside the container, so they
+# cannot be flipped at runtime — they must be in the environment before start.
+services:
+  adcp-server:
+    environment:
+      # delivery_webhook_scheduler.py:33 defaults to 3600s and sends on startup, so a
+      # media buy created after boot would otherwise wait up to an hour for its first
+      # delivery report. 5s makes the reporting-webhook path testable.
+      DELIVERY_WEBHOOK_INTERVAL: "5"
+      # Unlocks POST /test/auth (admin/blueprints/auth.py:770), which is how the harness
+      # drives media-buy approval programmatically. Without it the human-gated async
+      # lifecycle is unreachable in a headless run.
+      ADCP_AUTH_TEST_MODE: "true"
