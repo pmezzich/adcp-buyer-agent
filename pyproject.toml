@@ -1,0 +1,42 @@
+[project]
+name = "adcp-buyer-agent"
+version = "0.0.1"
+description = "An AdCP buyer-side agent (LLM-driven over a deterministic protocol core) plus a differential/property fuzzer for AdCP sales agents."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # Pin adcp to EXACTLY match the salesagent target (spec 3.1.0-beta.3) so wire
+    # shapes are identical on both sides of the differential fuzzer.
+    "adcp==5.7.0",
+    "httpx>=0.27",            # hand-rolled REST transport (adcp SDK has no REST protocol)
+    "pydantic>=2.9",
+    "anyio>=4.4",
+    # Buyer brain. Slim extra avoids pulling fastmcp>=3.3 (breaks adcp's mcp client),
+    # matching salesagent's own pydantic-ai-slim choice.
+    "pydantic-ai-slim[anthropic]>=1.99.0",
+    "hypothesis>=6.100",     # property/boundary fuzzing engine
+    "typer>=0.12",           # CLI for buyer + fuzzer entrypoints
+    "rich>=13.7",            # finding reports / console output
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adcp_buyer"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
