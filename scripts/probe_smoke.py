@@ -127,14 +127,18 @@ def probe_a2a(client: httpx.Client) -> None:
             }
         },
     }
-    r = client.post(f"{BASE}/a2a", headers={**HEADERS, "Content-Type": "application/json"}, json=body)
+    r = client.post(
+        f"{BASE}/a2a", headers={**HEADERS, "Content-Type": "application/json"}, json=body
+    )
     _show("message/send get_products", r.status_code, r.text)
 
     # #1670 probe: an unknown skill should raise MethodNotFoundError (-32601). If the
     # v0.3 compat adapter flattens it to -32603, that is the bug reproducing.
     body["params"]["message"]["parts"][0]["data"]["skill"] = "no_such_skill_xyz"
     body["id"] = str(uuid.uuid4())
-    r = client.post(f"{BASE}/a2a", headers={**HEADERS, "Content-Type": "application/json"}, json=body)
+    r = client.post(
+        f"{BASE}/a2a", headers={**HEADERS, "Content-Type": "application/json"}, json=body
+    )
     _show("message/send unknown skill", r.status_code, r.text)
 
 
