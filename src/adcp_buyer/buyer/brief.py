@@ -7,13 +7,21 @@ different buying behavior, no code change.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CampaignBrief(BaseModel):
+    # Reject inf/nan at validation (defense in depth on the money fields).
+    model_config = ConfigDict(allow_inf_nan=False)
+
     brand_domain: str
     brief: str  # natural-language brief; feeds get_products and (optionally) the LLM planner
     budget: float = Field(gt=0, description="total campaign budget ceiling")
+    currency: str = Field(
+        default="USD",
+        description="the budget/max_cpm currency; the guard "
+        "only considers pricing options quoted in this currency",
+    )
     max_cpm: float | None = Field(
         default=None, description="per-package CPM ceiling; None disables the CPM gate"
     )

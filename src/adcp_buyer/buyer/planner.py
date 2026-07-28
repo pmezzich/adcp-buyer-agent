@@ -22,21 +22,57 @@ from adcp_buyer.buyer.plan import CampaignPlan, PackagePlan, PricingSource
 logger = logging.getLogger(__name__)
 
 
-def _cheapest_option(product: dict) -> tuple[str, float] | None:
-    """The lowest-CPM supported pricing option for a product, or None if unpriced."""
-    best: tuple[str, float] | None = None
+def _cheapest_option(product: dict, currency: str) -> tuple[str, float, float] | None:
+    """Lowest-CPM buyable option in the brief's currency: (option_id, cpm, min_spend).
+
+    Only fixed-price options in the matching currency are buyable today — floor/auction
+    options need a bid_price we don't yet send, and a foreign-currency price can't be
+    compared to the ceiling. Returns None if the product has no such option.
+    """
+    best: tuple[str, float, float] | None = None
     for po in product.get("pricing_options") or []:
         if po.get("supported") is False:
             continue
+        if (po.get("currency") or "USD") != currency:
+            continue
         price = po.get("fixed_price")
-        if price is None:
-            price = po.get("floor_price")
-        if price is None:
+        if price is None:  # floor-only / auction — not buyable without a bid_price
             continue
         cpm = float(price)
         if best is None or cpm < best[1]:
-            best = (po["pricing_option_id"], cpm)
+            min_spend = po.get("min_spend_per_package")
+            best = (
+                po["pricing_option_id"],
+                cpm,
+                float(min_spend) if min_spend is not None else 0.0,
+            )
     return best
+
+
+def _allocate(
+    packages: list[PackagePlan], mins: dict[str, float], budget: float
+) -> list[PackagePlan]:
+    """Equal-split the budget; drop packages whose share falls below their min_spend, retry.
+
+    Absorbs rounding drift into the last package so the total never exceeds budget. Returns
+    the surviving packages (possibly empty if nothing meets its minimum at any split size).
+    """
+    current = list(packages)
+    for _ in range(len(packages)):
+        if not current:
+            break
+        per = round(budget / len(current), 2)
+        for pkg in current:
+            pkg.budget = per
+        drift = round(sum(p.budget for p in current) - budget, 2)
+        if drift != 0:
+            current[-1].budget = round(current[-1].budget - drift, 2)
+        below = [p for p in current if p.budget < mins.get(p.product_id, 0.0)]
+        if not below:
+            return current
+        # drop the least-affordable (highest min) and retry with a bigger per-package share
+        current.remove(max(below, key=lambda p: mins.get(p.product_id, 0.0)))
+    return current
 
 
 def _score(product: dict, cpm: float, brief: CampaignBrief) -> float:
@@ -50,16 +86,18 @@ def _score(product: dict, cpm: float, brief: CampaignBrief) -> float:
 
 
 def deterministic_plan(brief: CampaignBrief, products: list[dict]) -> CampaignPlan:
-    """Rule-based ranker. Over-ceiling products are disqualified; nothing forced."""
+    """Rule-based ranker. Over-ceiling / un-buyable / foreign-currency products are dropped."""
     scored: list[tuple[float, PackagePlan]] = []
+    mins: dict[str, float] = {}
     for product in products:
-        opt = _cheapest_option(product)
+        opt = _cheapest_option(product, brief.currency)
         if opt is None:
             continue
-        option_id, cpm = opt
+        option_id, cpm, min_spend = opt
         if brief.max_cpm is not None and cpm > brief.max_cpm:
             continue  # disqualified: over the CPM ceiling
         pid = product.get("product_id")
+        mins[pid] = min_spend
         scored.append(
             (
                 _score(product, cpm, brief),
@@ -77,17 +115,9 @@ def deterministic_plan(brief: CampaignBrief, products: list[dict]) -> CampaignPl
         return CampaignPlan(rationale="no product fits the brief within its CPM ceiling")
 
     scored.sort(key=lambda s: s[0], reverse=True)
-    chosen = [pkg for _, pkg in scored[: brief.max_packages]]
-
-    # Equal budget split across chosen packages. Round to cents, then absorb any rounding
-    # drift into the last package so the total is never a fraction over budget (which the
-    # spend-ceiling guard would otherwise, correctly, reject).
-    per = round(brief.budget / len(chosen), 2)
-    for pkg in chosen:
-        pkg.budget = per
-    drift = round(sum(p.budget for p in chosen) - brief.budget, 2)
-    if drift != 0:
-        chosen[-1].budget = round(chosen[-1].budget - drift, 2)
+    chosen = _allocate([pkg for _, pkg in scored[: brief.max_packages]], mins, brief.budget)
+    if not chosen:
+        return CampaignPlan(rationale="no product's minimum spend fits within the budget")
     return CampaignPlan(
         packages=chosen,
         rationale=f"selected {len(chosen)} of {len(products)} products by relevance + CPM efficiency",

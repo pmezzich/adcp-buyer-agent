@@ -5,6 +5,7 @@ scripts/run_campaign.py.
 """
 
 import pytest
+from pydantic import ValidationError
 
 from adcp_buyer.buyer.brief import CampaignBrief
 from adcp_buyer.buyer.guard import (
@@ -133,3 +134,104 @@ def test_fail_open_only_when_no_ceiling():
         packages=[PackagePlan(product_id="p", pricing_option_id="o", cpm=999.0, budget=5.0)]
     )
     enforce_spend_ceiling(plan, _brief(budget=10_000.0, max_cpm=None))  # no raise
+
+
+# ---- adversarial-audit regressions (currency, auction, min-spend, inf) ----
+
+GBP_PRODUCT = [
+    {
+        "product_id": "prod_gbp",
+        "name": "premium display advertising",
+        "description": "x",
+        "pricing_options": [
+            {
+                "pricing_option_id": "cpm_gbp_fixed",
+                "fixed_price": 12.0,
+                "currency": "GBP",
+                "supported": True,
+            }
+        ],
+    }
+]
+
+FLOOR_PRODUCT = [
+    {
+        "product_id": "prod_auction",
+        "name": "premium display advertising",
+        "description": "x",
+        "pricing_options": [
+            {
+                "pricing_option_id": "cpm_usd_auction",
+                "fixed_price": None,
+                "floor_price": 5.0,
+                "currency": "USD",
+                "supported": True,
+            }
+        ],
+    }
+]
+
+MIN_PRODUCT = [
+    {
+        "product_id": "prod_minspend",
+        "name": "premium display advertising",
+        "description": "x",
+        "pricing_options": [
+            {
+                "pricing_option_id": "cpm_usd_fixed",
+                "fixed_price": 10.0,
+                "currency": "USD",
+                "min_spend_per_package": 5000.0,
+                "supported": True,
+            }
+        ],
+    }
+]
+
+
+def test_foreign_currency_option_is_not_bought():
+    # £12 (< the USD 15 ceiling numerically, but ~$15.2) must NOT slip past a USD brief.
+    assert deterministic_plan(_brief(max_cpm=15.0, currency="USD"), GBP_PRODUCT).is_empty
+
+
+def test_resolve_drops_foreign_currency_package():
+    lie = CampaignPlan(
+        packages=[
+            PackagePlan(
+                product_id="prod_gbp", pricing_option_id="cpm_gbp_fixed", cpm=12.0, budget=100.0
+            )
+        ]
+    )
+    assert resolve_plan_pricing(lie, GBP_PRODUCT, "USD").is_empty
+
+
+def test_auction_floor_option_is_not_selected():
+    # floor-only / auction has no fixed_price and needs a bid_price we can't send -> skip.
+    assert deterministic_plan(_brief(max_cpm=30.0), FLOOR_PRODUCT).is_empty
+    p = CampaignPlan(
+        packages=[
+            PackagePlan(
+                product_id="prod_auction",
+                pricing_option_id="cpm_usd_auction",
+                cpm=5.0,
+                budget=100.0,
+            )
+        ]
+    )
+    assert resolve_plan_pricing(p, FLOOR_PRODUCT, "USD").is_empty
+
+
+def test_below_min_spend_is_dropped():
+    # budget 3000 < the option's 5000 minimum -> can't buy.
+    assert deterministic_plan(_brief(budget=3000.0, max_cpm=30.0), MIN_PRODUCT).is_empty
+
+
+def test_min_spend_met_buys():
+    plan = deterministic_plan(_brief(budget=6000.0, max_cpm=30.0), MIN_PRODUCT)
+    assert len(plan.packages) == 1
+    assert plan.packages[0].budget >= 5000.0
+
+
+def test_inf_budget_rejected_at_validation():
+    with pytest.raises(ValidationError):
+        PackagePlan(product_id="p", pricing_option_id="o", cpm=1.0, budget=float("inf"))

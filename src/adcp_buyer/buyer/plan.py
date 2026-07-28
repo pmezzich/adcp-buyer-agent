@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PricingSource(str, Enum):
@@ -19,6 +19,8 @@ class PricingSource(str, Enum):
 
 
 class PackagePlan(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)  # no inf/nan budgets or CPMs
+
     product_id: str
     pricing_option_id: str
     cpm: float = Field(ge=0)  # the option's price; authoritative value is re-stamped by the guard

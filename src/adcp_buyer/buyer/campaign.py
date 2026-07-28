@@ -75,7 +75,9 @@ def run_campaign(brief: CampaignBrief, *, use_llm: bool = True) -> CampaignResul
         "products", []
     )
 
-    plan = resolve_plan_pricing(plan_campaign(brief, products, use_llm=use_llm), products)
+    plan = resolve_plan_pricing(
+        plan_campaign(brief, products, use_llm=use_llm), products, brief.currency
+    )
     if plan.is_empty:
         return CampaignResult(
             status="no_buy",

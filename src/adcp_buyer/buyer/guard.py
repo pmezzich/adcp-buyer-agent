@@ -25,18 +25,26 @@ class SpendCeilingExceeded(Exception):
         self.detail = detail or {}
 
 
-def authoritative_cpm(product: dict, pricing_option_id: str) -> float | None:
-    """The seller's real CPM for an option: fixed_price, else floor_price, else None."""
+def authoritative_cpm(product: dict, pricing_option_id: str, currency: str = "USD") -> float | None:
+    """The seller's real fixed CPM for an option, or None if it can't be booked as-is.
+
+    Returns None when the option is in a different currency than the brief (comparing a
+    foreign CPM against the ceiling is a real overspend) or when it has no fixed_price
+    (floor/auction options need a bid_price the plan can't yet carry).
+    """
     for po in product.get("pricing_options") or []:
-        if po.get("pricing_option_id") == pricing_option_id:
-            price = po.get("fixed_price")
-            if price is None:
-                price = po.get("floor_price")
-            return float(price) if price is not None else None
+        if po.get("pricing_option_id") != pricing_option_id:
+            continue
+        if (po.get("currency") or "USD") != currency:
+            return None
+        price = po.get("fixed_price")
+        return float(price) if price is not None else None
     return None
 
 
-def resolve_plan_pricing(plan: CampaignPlan, products: list[dict]) -> CampaignPlan:
+def resolve_plan_pricing(
+    plan: CampaignPlan, products: list[dict], currency: str = "USD"
+) -> CampaignPlan:
     """Re-stamp each package's CPM from the authoritative product pricing option.
 
     Defeats a self-authorizing planner: the ceiling check runs against the seller's real
@@ -47,7 +55,7 @@ def resolve_plan_pricing(plan: CampaignPlan, products: list[dict]) -> CampaignPl
     resolved: list[PackagePlan] = []
     for pkg in plan.packages:
         product = index.get(pkg.product_id)
-        cpm = authoritative_cpm(product, pkg.pricing_option_id) if product else None
+        cpm = authoritative_cpm(product, pkg.pricing_option_id, currency) if product else None
         if cpm is None:
             logger.warning(
                 "dropping package %s/%s: no authoritative seller price",
