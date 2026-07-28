@@ -65,6 +65,28 @@ def await_active(media_buy_id: str, *, max_polls: int = 10, interval_seconds: fl
 
 
 @DBOS.workflow()
+def await_completion(
+    media_buy_id: str,
+    *,
+    webhook_timeout: float = 30.0,
+    max_polls: int = 10,
+    interval_seconds: float = 2.0,
+) -> dict:
+    """Rendezvous: durably wait for the seller's webhook, falling back to polling.
+
+    Blocks on DBOS.recv (topic "webhook", = sink.WEBHOOK_TOPIC) — the sink wakes it when a
+    webhook lands. If no webhook arrives within webhook_timeout, poll instead. Either path is
+    crash-safe. On the ci-test tenant buys auto-complete with no webhook, so this resolves via
+    the poll fallback; the webhook branch needs a `submitted`-returning seller flow.
+    """
+    msg = DBOS.recv("webhook", timeout_seconds=webhook_timeout)
+    if msg is not None:
+        return {"source": "webhook", "payload": msg}
+    poll = await_active(media_buy_id, max_polls=max_polls, interval_seconds=interval_seconds)
+    return {"source": "poll", **poll}
+
+
+@DBOS.workflow()
 def monitor_delivery(
     media_buy_id: str, *, polls: int = 3, interval_seconds: float = 2.0
 ) -> list[dict]:
