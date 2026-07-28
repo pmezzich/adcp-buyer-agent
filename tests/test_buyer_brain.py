@@ -6,6 +6,7 @@ scripts/run_campaign.py.
 
 import pytest
 from pydantic import ValidationError
+from pydantic_ai.models.test import TestModel
 
 from adcp_buyer.buyer.brief import CampaignBrief
 from adcp_buyer.buyer.guard import (
@@ -14,7 +15,7 @@ from adcp_buyer.buyer.guard import (
     resolve_plan_pricing,
 )
 from adcp_buyer.buyer.plan import CampaignPlan, PackagePlan, PricingSource
-from adcp_buyer.buyer.planner import deterministic_plan
+from adcp_buyer.buyer.planner import deterministic_plan, llm_plan, plan_campaign
 
 # Two products mirroring the ci-test seed: display $15, video $25.
 PRODUCTS = [
@@ -235,3 +236,57 @@ def test_min_spend_met_buys():
 def test_inf_budget_rejected_at_validation():
     with pytest.raises(ValidationError):
         PackagePlan(product_id="p", pricing_option_id="o", cpm=1.0, budget=float("inf"))
+
+
+# ---- LLM planner path, exercised with an injected TestModel (no key, no network) ----
+
+
+def test_llm_plan_runs_with_injected_test_model():
+    tm = TestModel(
+        custom_output_args={
+            "packages": [
+                {
+                    "product_id": "prod_display_premium",
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "cpm": 15.0,
+                    "budget": 5000.0,
+                }
+            ],
+            "rationale": "test-model plan",
+        }
+    )
+    plan = llm_plan(_brief(max_cpm=30.0), PRODUCTS, model=tm)
+    assert plan is not None
+    assert [p.product_id for p in plan.packages] == ["prod_display_premium"]
+
+
+def test_llm_plan_returns_none_without_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert llm_plan(_brief(), PRODUCTS) is None  # no model injected, no key -> falls back
+
+
+def test_plan_campaign_uses_injected_model_to_buy_nothing():
+    tm = TestModel(custom_output_args={"packages": [], "rationale": "nothing fits"})
+    assert plan_campaign(_brief(), PRODUCTS, use_llm=True, model=tm).is_empty
+
+
+def test_lying_llm_cpm_is_restamped_then_rejected():
+    # The LLM claims a $1 CPM on the $25 video to slip past a $15 ceiling — the guard must win.
+    tm = TestModel(
+        custom_output_args={
+            "packages": [
+                {
+                    "product_id": "prod_video_premium",
+                    "pricing_option_id": "cpm_usd_fixed",
+                    "cpm": 1.0,  # fabricated
+                    "budget": 100.0,
+                }
+            ],
+            "rationale": "sneaky",
+        }
+    )
+    plan = llm_plan(_brief(max_cpm=15.0), PRODUCTS, model=tm)
+    resolved = resolve_plan_pricing(plan, PRODUCTS, "USD")
+    assert resolved.packages[0].cpm == 25.0  # re-stamped to the real video price
+    with pytest.raises(SpendCeilingExceeded):
+        enforce_spend_ceiling(resolved, _brief(max_cpm=15.0))  # now correctly rejected

@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from typing import Any
 
 from adcp_buyer.buyer.brief import CampaignBrief
 from adcp_buyer.buyer.plan import CampaignPlan, PackagePlan, PricingSource
@@ -124,47 +125,58 @@ def deterministic_plan(brief: CampaignBrief, products: list[dict]) -> CampaignPl
     )
 
 
-def llm_plan(brief: CampaignBrief, products: list[dict]) -> CampaignPlan | None:
-    """Optional Claude planner. Returns None (caller falls back) if unavailable or on error."""
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return None
+_SYSTEM_PROMPT = (
+    "You are a media buyer. Given a campaign brief and a list of products with their pricing "
+    "options, choose the packages to buy and split the budget. NEVER estimate, assume, or "
+    "fabricate CPM pricing — only use the fixed_price the product actually declares. Never "
+    "exceed the brief's max_cpm or total budget. It is correct to buy nothing if nothing fits."
+)
+
+
+def _planner_prompt(brief: CampaignBrief, products: list[dict]) -> str:
+    summary = [
+        {
+            "product_id": p.get("product_id"),
+            "name": p.get("name"),
+            "description": p.get("description"),
+            "pricing_options": p.get("pricing_options"),
+        }
+        for p in products
+    ]
+    return f"Brief: {brief.model_dump_json()}\n\nProducts: {summary}"
+
+
+def llm_plan(
+    brief: CampaignBrief, products: list[dict], *, model: Any = None
+) -> CampaignPlan | None:
+    """Optional LLM planner.
+
+    ``model`` is injectable: pass a pydantic-ai Model (e.g. a TestModel) to run without a
+    key/network; leave it None to use the real Claude model, which is only attempted when
+    ANTHROPIC_API_KEY is set. Returns None (caller falls back) if unavailable or on error.
+    """
+    if model is None:
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            return None
+        model = os.environ.get("BUYER_PLANNER_MODEL", "anthropic:claude-opus-4-8")
     try:
         from pydantic_ai import Agent
 
-        model = os.environ.get("BUYER_PLANNER_MODEL", "anthropic:claude-opus-4-8")
         agent = Agent(
-            model,
-            output_type=CampaignPlan,
-            system_prompt=(
-                "You are a media buyer. Given a campaign brief and a list of products with "
-                "their pricing options, choose the packages to buy and split the budget. "
-                "NEVER estimate, assume, or fabricate CPM pricing — only use the fixed_price / "
-                "floor_price the product actually declares. Never exceed the brief's max_cpm or "
-                "total budget. It is correct to buy nothing if nothing fits."
-            ),
+            model, output_type=CampaignPlan, system_prompt=_SYSTEM_PROMPT, defer_model_check=True
         )
-        summary = [
-            {
-                "product_id": p.get("product_id"),
-                "name": p.get("name"),
-                "description": p.get("description"),
-                "pricing_options": p.get("pricing_options"),
-            }
-            for p in products
-        ]
-        prompt = f"Brief: {brief.model_dump_json()}\n\nProducts: {summary}"
-        return agent.run_sync(prompt).output
+        return agent.run_sync(_planner_prompt(brief, products)).output
     except Exception as exc:  # noqa: BLE001 — any planner failure falls back deterministically
         logger.warning("llm_plan failed (%s); falling back to deterministic planner", exc)
         return None
 
 
 def plan_campaign(
-    brief: CampaignBrief, products: list[dict], *, use_llm: bool = True
+    brief: CampaignBrief, products: list[dict], *, use_llm: bool = True, model: Any = None
 ) -> CampaignPlan:
-    """Plan a campaign: LLM if available and enabled, else the deterministic ranker."""
+    """Plan a campaign: LLM if available/enabled (or a model is injected), else the ranker."""
     if use_llm:
-        plan = llm_plan(brief, products)
+        plan = llm_plan(brief, products, model=model)
         if plan is not None:
             return plan
     return deterministic_plan(brief, products)

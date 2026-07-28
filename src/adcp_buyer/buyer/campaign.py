@@ -67,8 +67,14 @@ def _to_request(plan: CampaignPlan, brief: CampaignBrief, account_id: str) -> di
     }
 
 
-def run_campaign(brief: CampaignBrief, *, use_llm: bool = True) -> CampaignResult:
-    """Run one campaign end-to-end. Requires DBOS initialized (dbos_app.init_dbos)."""
+def run_campaign(
+    brief: CampaignBrief, *, use_llm: bool = True, model: Any = None
+) -> CampaignResult:
+    """Run one campaign end-to-end. Requires DBOS initialized (dbos_app.init_dbos).
+
+    ``model`` injects a pydantic-ai model into the planner (e.g. a TestModel to run the LLM
+    path without a key); otherwise the real Claude model is used only when a key is set.
+    """
     transport = dbos_app.get_transport()
 
     products = (transport.call("get_products", {"brief": brief.brief}).wire_response or {}).get(
@@ -76,7 +82,7 @@ def run_campaign(brief: CampaignBrief, *, use_llm: bool = True) -> CampaignResul
     )
 
     plan = resolve_plan_pricing(
-        plan_campaign(brief, products, use_llm=use_llm), products, brief.currency
+        plan_campaign(brief, products, use_llm=use_llm, model=model), products, brief.currency
     )
     if plan.is_empty:
         return CampaignResult(
