@@ -4,7 +4,9 @@ The durable/integration behavior (DBOS exactly-once against a live seller) is ex
 by scripts/run_create_media_buy.py; these cover the deterministic pieces with no infra.
 """
 
-from adcp_buyer.core.idempotency import jcs_key
+from adcp.server.idempotency import canonical_json_sha256
+
+from adcp_buyer.core.idempotency import canonical_payload, jcs_key
 from adcp_buyer.core.result import Exchange
 
 
@@ -20,6 +22,53 @@ def test_jcs_key_excludes_idempotency_and_context():
     assert jcs_key({**base, "idempotency_key": "anything"}) == k
     assert jcs_key({**base, "context": {"foo": "bar"}}) == k
     assert jcs_key({**base, "governance_context": {"g": 1}}) == k
+
+
+def test_jcs_key_is_byte_identical_to_the_sdk_the_seller_dedupes_on():
+    """The buyer's hash IS the wire key, so any disagreement with the seller is a double-book.
+
+    salesagent hashes through adcp.server.idempotency.canonical_json_sha256
+    (src/core/idempotency_canonical.py). Equality here is what makes "the seller will replay
+    our retry" true rather than hoped for.
+    """
+    payload = {
+        "brand": {"domain": "x.com"},
+        "packages": [{"product_id": "p1", "budget": 5.0}],
+        "context": {"ignored": True},
+        "idempotency_key": "ignored-too",
+    }
+    assert jcs_key(payload) == canonical_json_sha256(payload)
+
+
+def test_rotating_a_webhook_credential_does_not_change_the_key():
+    """The spec's exclusion list is not flat: it also strips
+    push_notification_config.authentication.credentials.
+
+    A hand-rolled version stripped only the three TOP-LEVEL fields, so rotating a webhook
+    credential between an attempt and its retry minted a second key for what the seller
+    treats as one request -- and the campaign booked twice.
+    """
+
+    def buy(cred):
+        return {
+            "brand": {"domain": "x.com"},
+            "packages": [{"product_id": "p1", "budget": 5.0}],
+            "push_notification_config": {
+                "url": "https://buyer.example/hook",
+                "authentication": {"scheme": "bearer", "credentials": cred},
+            },
+        }
+
+    assert jcs_key(buy("token-1")) == jcs_key(buy("token-2"))
+    # ...but the surrounding webhook config is still material.
+    rerouted = buy("token-1")
+    rerouted["push_notification_config"]["url"] = "https://elsewhere.example/hook"
+    assert jcs_key(rerouted) != jcs_key(buy("token-1"))
+
+
+def test_canonical_payload_shows_what_was_excluded():
+    stripped = canonical_payload({"budget": 5.0, "context": {"a": 1}, "idempotency_key": "k"})
+    assert stripped == {"budget": 5.0}
 
 
 def test_jcs_key_changes_on_material_field():
