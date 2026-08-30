@@ -61,18 +61,32 @@ class RestTransport:
         try:
             parsed = resp.json()
         except ValueError:
-            parsed = {"_nonjson_body": resp.text[:2000]}
+            parsed = None
 
         # A two-layer AdCP error envelope carries adcp_error + errors; otherwise it's a payload.
-        is_err = isinstance(parsed, dict) and "adcp_error" in parsed
+        envelope = parsed if isinstance(parsed, dict) and "adcp_error" in parsed else None
+        payload = parsed if isinstance(parsed, dict) and envelope is None else None
+
+        # Anything we could not read as a dict payload or an envelope stays UNCLASSIFIED --
+        # never a synthesized payload, which is_success would then read as a completed call.
+        reason = None
+        if envelope is None and payload is None:
+            reason = (
+                "response body is not JSON"
+                if parsed is None
+                else f"JSON body is {type(parsed).__name__}, not an object"
+            )
+
         return Exchange(
             op=op,
             wire="rest",
             request=body,
             status_code=resp.status_code,
-            wire_response=None if is_err else parsed,
-            wire_error_envelope=parsed if is_err else None,
+            wire_response=payload,
+            wire_error_envelope=envelope,
             idempotency_key=body.get("idempotency_key"),
+            raw_body=resp.text[:8000],
+            unclassified_reason=reason,
         )
 
     def close(self) -> None:

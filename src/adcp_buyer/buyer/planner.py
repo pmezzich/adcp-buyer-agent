@@ -19,6 +19,7 @@ from typing import Any
 
 from adcp_buyer.buyer.brief import CampaignBrief
 from adcp_buyer.buyer.plan import CampaignPlan, PackagePlan, PricingSource
+from adcp_buyer.buyer.pricing import buyable_price
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +33,9 @@ def _cheapest_option(product: dict, currency: str) -> tuple[str, float, float] |
     """
     best: tuple[str, float, float] | None = None
     for po in product.get("pricing_options") or []:
-        if po.get("supported") is False:
+        cpm = buyable_price(po, currency)
+        if cpm is None:  # unsupported, foreign currency, floor-only, or not a finite price
             continue
-        if (po.get("currency") or "USD") != currency:
-            continue
-        price = po.get("fixed_price")
-        if price is None:  # floor-only / auction — not buyable without a bid_price
-            continue
-        cpm = float(price)
         if best is None or cpm < best[1]:
             min_spend = po.get("min_spend_per_package")
             best = (

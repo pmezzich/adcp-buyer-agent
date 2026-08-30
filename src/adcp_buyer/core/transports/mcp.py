@@ -94,6 +94,20 @@ class McpTransport:
         }
         resp = self._client.post(self._url, headers=self._headers(authed=authed), json=req)
         rpc = _parse_sse(resp.text)
+
+        # No JSON-RPC frame at all (401 HTML, 502 from a proxy, "Missing session ID", an
+        # empty body). Classifying this as anything but UNCLASSIFIED is how a failed
+        # mutating call reads as a completed one.
+        if not rpc:
+            return Exchange(
+                op=op,
+                wire="mcp",
+                request=body,
+                status_code=resp.status_code,
+                idempotency_key=body.get("idempotency_key"),
+                raw_body=resp.text[:8000],
+                unclassified_reason="no JSON-RPC frame in the response body",
+            )
         result = rpc.get("result") or {}
 
         # isError -> the content text is the two-layer AdCP envelope
@@ -106,6 +120,7 @@ class McpTransport:
                 status_code=resp.status_code,
                 wire_error_envelope=envelope,
                 idempotency_key=body.get("idempotency_key"),
+                raw_body=resp.text[:8000],
             )
         # JSON-RPC transport error (e.g. unknown tool)
         if "error" in rpc:
@@ -123,10 +138,23 @@ class McpTransport:
                     },
                     "errors": [{"code": "JSONRPC_ERROR"}],
                 },
+                raw_body=resp.text[:8000],
             )
         payload = result.get("structuredContent")
         if payload is None:
-            payload = _first_text_json(result) or {"content": result.get("content")}
+            payload = _first_text_json(result)
+        if not isinstance(payload, dict):
+            # A JSON-RPC result we cannot read as a payload is not a success. The previous
+            # {"content": ...} wrapper made every such response look like one.
+            return Exchange(
+                op=op,
+                wire="mcp",
+                request=body,
+                status_code=resp.status_code,
+                idempotency_key=body.get("idempotency_key"),
+                raw_body=resp.text[:8000],
+                unclassified_reason="JSON-RPC result carried no structuredContent and no JSON text part",
+            )
         return Exchange(
             op=op,
             wire="mcp",
@@ -134,6 +162,7 @@ class McpTransport:
             status_code=resp.status_code,
             wire_response=payload,
             idempotency_key=body.get("idempotency_key"),
+            raw_body=resp.text[:8000],
         )
 
     def close(self) -> None:

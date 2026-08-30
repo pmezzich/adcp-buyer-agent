@@ -54,6 +54,17 @@ class A2aTransport:
         except ValueError:
             rpc = {}
 
+        if not rpc:
+            return Exchange(
+                op=op,
+                wire="a2a",
+                request=body,
+                status_code=resp.status_code,
+                idempotency_key=body.get("idempotency_key"),
+                raw_body=resp.text[:8000],
+                unclassified_reason="response body is not JSON-RPC",
+            )
+
         if "error" in rpc:  # JSON-RPC transport/protocol error
             err = rpc["error"]
             return Exchange(
@@ -69,9 +80,12 @@ class A2aTransport:
                     },
                     "errors": [{"code": "JSONRPC_ERROR"}],
                 },
+                raw_body=resp.text[:8000],
             )
 
-        payload = _extract_data_part(rpc.get("result") or {})
+        task = rpc.get("result") or {}
+        task_state = ((task.get("status") or {}).get("state")) if isinstance(task, dict) else None
+        payload = _extract_data_part(task)
         if isinstance(payload, dict) and "adcp_error" in payload:
             return Exchange(
                 op=op,
@@ -80,14 +94,36 @@ class A2aTransport:
                 status_code=resp.status_code,
                 wire_error_envelope=payload,
                 idempotency_key=body.get("idempotency_key"),
+                raw_body=resp.text[:8000],
+                extra={"task_state": task_state} if task_state else {},
+            )
+        if not isinstance(payload, dict):
+            # A Task with no readable DataPart is NOT a success. The seller's manual-approval
+            # shape (state=submitted, artifacts cleared) lands here; wrapping it as
+            # {"_payload": None} previously made a pending buy report as a completed one.
+            return Exchange(
+                op=op,
+                wire="a2a",
+                request=body,
+                status_code=resp.status_code,
+                idempotency_key=body.get("idempotency_key"),
+                raw_body=resp.text[:8000],
+                unclassified_reason=(
+                    f"Task carried no data part (state={task_state!r})"
+                    if task_state
+                    else "Task carried no data part"
+                ),
+                extra={"task_state": task_state} if task_state else {},
             )
         return Exchange(
             op=op,
             wire="a2a",
             request=body,
             status_code=resp.status_code,
-            wire_response=payload if isinstance(payload, dict) else {"_payload": payload},
+            wire_response=payload,
             idempotency_key=body.get("idempotency_key"),
+            raw_body=resp.text[:8000],
+            extra={"task_state": task_state} if task_state else {},
         )
 
     def close(self) -> None:

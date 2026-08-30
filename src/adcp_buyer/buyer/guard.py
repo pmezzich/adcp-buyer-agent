@@ -10,9 +10,11 @@ or over-budget plans. The rejection is NOT a ValueError/RuntimeError so a broad
 from __future__ import annotations
 
 import logging
+import math
 
 from adcp_buyer.buyer.brief import CampaignBrief
 from adcp_buyer.buyer.plan import CampaignPlan, PackagePlan, PricingSource
+from adcp_buyer.buyer.pricing import buyable_price
 
 logger = logging.getLogger(__name__)
 
@@ -28,18 +30,23 @@ class SpendCeilingExceeded(Exception):
 def authoritative_cpm(product: dict, pricing_option_id: str, currency: str = "USD") -> float | None:
     """The seller's real fixed CPM for an option, or None if it can't be booked as-is.
 
-    Returns None when the option is in a different currency than the brief (comparing a
-    foreign CPM against the ceiling is a real overspend) or when it has no fixed_price
-    (floor/auction options need a bid_price the plan can't yet carry).
+    Delegates the "is this bookable, and at what price" decision to
+    :func:`~adcp_buyer.buyer.pricing.buyable_price`, which the planner uses too, so the
+    price the ceiling is checked against is chosen by the same rule that chose the option.
+
+    Scans EVERY option carrying the id rather than returning on the first match: sellers do
+    not guarantee ``pricing_option_id`` is unique within a product, and returning on the
+    first match let an unbookable duplicate mask a bookable one. When several are bookable,
+    the highest price wins — the ceiling must be checked against the worst the seller could
+    charge, not the best.
     """
-    for po in product.get("pricing_options") or []:
-        if po.get("pricing_option_id") != pricing_option_id:
-            continue
-        if (po.get("currency") or "USD") != currency:
-            return None
-        price = po.get("fixed_price")
-        return float(price) if price is not None else None
-    return None
+    prices = [
+        price
+        for po in product.get("pricing_options") or []
+        if po.get("pricing_option_id") == pricing_option_id
+        and (price := buyable_price(po, currency)) is not None
+    ]
+    return max(prices) if prices else None
 
 
 def resolve_plan_pricing(
@@ -70,8 +77,17 @@ def resolve_plan_pricing(
                 pkg.cpm,
                 cpm,
             )
+        # model_validate, NOT model_copy: model_copy skips validation, so PackagePlan's own
+        # allow_inf_nan=False and ge=0 constraints were decoration on this path rather than
+        # a floor. Re-validating makes the model the last line of defence it claims to be.
         resolved.append(
-            pkg.model_copy(update={"cpm": cpm, "pricing_source": PricingSource.SELLER_QUOTED})
+            PackagePlan.model_validate(
+                {
+                    **pkg.model_dump(),
+                    "cpm": cpm,
+                    "pricing_source": PricingSource.SELLER_QUOTED,
+                }
+            )
         )
     return plan.model_copy(update={"packages": resolved})
 
@@ -82,6 +98,16 @@ def enforce_spend_ceiling(plan: CampaignPlan, brief: CampaignBrief) -> None:
     Fail-open (with a warning) only when the brief supplies no ceiling at all — a supplied
     limit is never silently disabled.
     """
+    # Non-finite values first: every `>` against NaN is False, so an unchecked NaN would
+    # pass BOTH gates below. Reject rather than compare.
+    for pkg in plan.packages:
+        if not math.isfinite(pkg.cpm) or not math.isfinite(pkg.budget):
+            raise SpendCeilingExceeded(
+                f"package {pkg.product_id} carries a non-finite cpm/budget "
+                f"({pkg.cpm}/{pkg.budget}); refusing to compare it against any ceiling",
+                detail={"product_id": pkg.product_id, "cpm": pkg.cpm, "budget": pkg.budget},
+            )
+
     if brief.max_cpm is not None:
         for pkg in plan.packages:
             if pkg.cpm > brief.max_cpm:
@@ -93,6 +119,10 @@ def enforce_spend_ceiling(plan: CampaignPlan, brief: CampaignBrief) -> None:
         logger.warning("brief has no max_cpm; the per-package CPM ceiling is not enforced")
 
     total = plan.total_budget
+    if not math.isfinite(total):
+        raise SpendCeilingExceeded(
+            f"plan total budget is non-finite ({total})", detail={"total": total}
+        )
     if total > brief.budget:
         raise SpendCeilingExceeded(
             f"total plan budget {total} exceeds campaign budget {brief.budget}",

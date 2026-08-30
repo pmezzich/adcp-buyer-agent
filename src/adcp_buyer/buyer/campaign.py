@@ -18,13 +18,21 @@ from adcp_buyer.buyer.executor import create_media_buy
 from adcp_buyer.buyer.guard import SpendCeilingExceeded, enforce_spend_ceiling, resolve_plan_pricing
 from adcp_buyer.buyer.plan import CampaignPlan
 from adcp_buyer.buyer.planner import plan_campaign
-from adcp_buyer.core.idempotency import jcs_key
 from adcp_buyer.core.result import Exchange
+
+
+class AccountRegistrationFailed(Exception):
+    """sync_accounts did not return an account. Carries the Exchange so the reason survives."""
+
+    def __init__(self, exchange: Exchange) -> None:
+        super().__init__(exchange.describe())
+        self.exchange = exchange
 
 
 @dataclass
 class CampaignResult:
-    status: str  # "bought" | "no_buy" | "refused" | "error"
+    # "bought" | "no_buy" | "refused" | "error" | "indeterminate"
+    status: str
     plan: CampaignPlan
     reason: str = ""
     media_buy_id: str | None = None
@@ -32,8 +40,20 @@ class CampaignResult:
     products: list[dict[str, Any]] = field(default_factory=list)
 
 
-def ensure_account(transport, brief: CampaignBrief) -> str | None:
-    """Register (idempotently) the buyer account and return the seller-minted account_id."""
+def ensure_account(transport, brief: CampaignBrief) -> str:
+    """Register the buyer account and return the seller-minted account_id.
+
+    Raises AccountRegistrationFailed rather than returning None on any non-success. The
+    previous version read ``(ex.wire_response or {}).get("accounts")`` without consulting
+    ``ex.is_success``, so a seller rejection became an empty list and then a bare "could not
+    register account" — the wire's own reason was discarded on the path that leads to a buy.
+
+    No ``idempotency_key`` is sent. The pinned schema marks it required on
+    sync-accounts-request, but salesagent rejects it over REST ("Extra inputs are not
+    permitted") and MCP ("Unexpected keyword argument"), and ignores it on A2A — see
+    prebid/salesagent#1983, #2119, #2120. Sending it makes every REST/MCP call a 400, so the
+    buyer omits a field the spec requires and the seller cannot accept.
+    """
     body = {
         "accounts": [
             {
@@ -44,10 +64,14 @@ def ensure_account(transport, brief: CampaignBrief) -> str | None:
             }
         ]
     }
-    body["idempotency_key"] = jcs_key(body)
     ex = transport.call("sync_accounts", body)
+    if not ex.is_success:
+        raise AccountRegistrationFailed(ex)
     accounts = (ex.wire_response or {}).get("accounts") or []
-    return accounts[0].get("account_id") if accounts else None
+    account_id = accounts[0].get("account_id") if accounts else None
+    if not account_id:
+        raise AccountRegistrationFailed(ex)
+    return account_id
 
 
 def _to_request(plan: CampaignPlan, brief: CampaignBrief, account_id: str) -> dict[str, Any]:
@@ -97,14 +121,28 @@ def run_campaign(
     except SpendCeilingExceeded as exc:
         return CampaignResult(status="refused", plan=plan, reason=str(exc), products=products)
 
-    account_id = ensure_account(transport, brief)
-    if not account_id:
-        return CampaignResult(status="error", plan=plan, reason="could not register account")
+    try:
+        account_id = ensure_account(transport, brief)
+    except AccountRegistrationFailed as exc:
+        return CampaignResult(
+            status="error",
+            plan=plan,
+            reason=f"could not register account: {exc}",
+            exchange=exc.exchange,
+            products=products,
+        )
 
     ex = create_media_buy(_to_request(plan, brief, account_id))
     if ex.is_error:
         return CampaignResult(
-            status="error", plan=plan, reason=str(ex.error_code), exchange=ex, products=products
+            status="error", plan=plan, reason=ex.describe(), exchange=ex, products=products
+        )
+    if ex.is_indeterminate:
+        # 2xx with nothing readable. The seller MAY have booked. Never report this as
+        # bought, and never retry it blindly — the same idempotency key is the only safe
+        # way to find out, which is what re-running the durable workflow does.
+        return CampaignResult(
+            status="indeterminate", plan=plan, reason=ex.describe(), exchange=ex, products=products
         )
     return CampaignResult(
         status="bought",

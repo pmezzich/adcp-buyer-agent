@@ -5,9 +5,15 @@ description = "An AdCP buyer-side agent (LLM-driven over a deterministic protoco
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    # Pin adcp to EXACTLY match the salesagent target (spec 3.1.0-beta.3) so wire
-    # shapes are identical on both sides of the differential fuzzer.
-    "adcp==5.7.0",
+    # Pin adcp to EXACTLY match the salesagent target so wire shapes and the bundled
+    # pinned schemas are identical on both sides of the differential fuzzer. salesagent
+    # moved 5.7.0 (spec 3.1.0-beta.3) -> 6.6.0 (spec 3.1.1); this pin follows it, and
+    # tests/test_pins.py fails if the two ever drift again.
+    "adcp==6.6.0",
+    # DIRECTLY imported by core/idempotency.py (the money path). It also arrives as an
+    # adcp dependency, but a direct import must be a direct dependency: relying on the
+    # transitive edge meant an adcp bump or removal could break exactly-once silently.
+    "rfc8785>=0.1.4",
     "httpx>=0.27",            # hand-rolled REST transport (adcp SDK has no REST protocol)
     "pydantic>=2.9",
     "anyio>=4.4",
