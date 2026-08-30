@@ -37,7 +37,7 @@ TENANT = os.environ.get("SELLER_TENANT", "ci-test")
 def _seller_is_up() -> bool:
     try:
         return httpx.get(f"{BASE}/health", timeout=3.0).status_code == 200
-    except Exception:
+    except (httpx.HTTPError, OSError):
         return False
 
 

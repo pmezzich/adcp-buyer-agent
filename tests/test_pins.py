@@ -107,7 +107,7 @@ def test_a_live_seller_advertises_a_major_version_we_target():
             },
             timeout=5.0,
         )
-    except Exception:
+    except (httpx.HTTPError, OSError):
         pytest.skip(f"no salesagent reachable at {base}")
     if resp.status_code != 200:
         pytest.skip(f"capabilities returned {resp.status_code}")
@@ -134,7 +134,7 @@ def test_a_live_seller_still_supports_idempotency_replay():
             },
             timeout=5.0,
         )
-    except Exception:
+    except (httpx.HTTPError, OSError):
         pytest.skip(f"no salesagent reachable at {base}")
     if resp.status_code != 200:
         pytest.skip(f"capabilities returned {resp.status_code}")

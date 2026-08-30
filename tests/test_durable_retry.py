@@ -23,6 +23,9 @@ import uuid
 import httpx
 import pytest
 
+# DBOS does not re-export its exception types at package level.
+from dbos._error import DBOSMaxStepRetriesExceeded
+
 BUYER_DB = os.environ.get(
     "BUYER_DATABASE_URL", "postgresql://postgres:buyer@127.0.0.1:5544/adcp_buyer"
 )
@@ -35,7 +38,7 @@ DEAD = "http://127.0.0.1:59998"  # nothing listens here
 def _seller_up() -> bool:
     try:
         return httpx.get(f"{SELLER}/health", timeout=3.0).status_code == 200
-    except Exception:
+    except (httpx.HTTPError, OSError):
         return False
 
 
@@ -45,7 +48,7 @@ def _buyer_db_up() -> bool:
 
         with psycopg.connect(BUYER_DB, connect_timeout=3):
             return True
-    except Exception:
+    except (ImportError, psycopg.Error, OSError):
         return False
 
 
@@ -92,8 +95,10 @@ def test_a_failed_attempt_can_be_retried_once_the_seller_recovers():
 
     dbos_app.init_dbos(base_url=DEAD, token=TOKEN, tenant=TENANT, database_url=BUYER_DB)
     try:
-        with pytest.raises(Exception):
-            create_media_buy(plan)  # seller unreachable
+        # Narrow on purpose: a bare `Exception` here would also pass if the call blew up
+        # for an unrelated reason, and the point is that the SELLER was unreachable.
+        with pytest.raises(DBOSMaxStepRetriesExceeded):
+            create_media_buy(plan)
 
         # Same plan, seller now healthy.
         dbos_app._transport = RestTransport(base_url=SELLER, token=TOKEN, tenant=TENANT)
@@ -102,7 +107,4 @@ def test_a_failed_attempt_can_be_retried_once_the_seller_recovers():
         assert result.is_success, f"the plan was burned by its earlier failure: {result.describe()}"
         assert (result.wire_response or {}).get("media_buy_id")
     finally:
-        try:
-            dbos_app.DBOS.destroy()
-        except Exception:
-            pass
+        dbos_app.DBOS.destroy()

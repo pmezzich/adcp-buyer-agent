@@ -75,8 +75,14 @@ def _next_workflow_id(key: str) -> str:
             statuses = DBOS.list_workflows(
                 workflow_ids=[wf_id], load_input=False, load_output=False
             )
-        except Exception:  # DBOS not launched, or the system DB is unreachable
-            logger.warning("could not read DBOS workflow status for %s; using it as-is", wf_id)
+        except Exception as exc:  # noqa: BLE001 -- see below
+            # Deliberately broad: DBOS exports no public exception base (its types live in
+            # the private dbos._error), and this lookup is an optimisation, not a
+            # correctness step. Any failure to read status -- DBOS not launched, system DB
+            # unreachable, an API change -- falls back to the bare key, which is the old
+            # behaviour: never double-dispatches, only unretryable after a failure. Failing
+            # the buy because we could not read a status would be strictly worse.
+            logger.warning("could not read DBOS status for %s (%s); using it as-is", wf_id, exc)
             return wf_id
         if not statuses:
             return wf_id  # never run
