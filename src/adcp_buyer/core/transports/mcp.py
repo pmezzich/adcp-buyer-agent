@@ -16,20 +16,36 @@ import httpx
 from adcp_buyer.core.result import Exchange
 
 
-def _parse_sse(text: str) -> dict[str, Any]:
-    """Return the JSON-RPC object from a streamable-http (SSE or plain) response body."""
+def _parse_sse(text: str, want_id: Any = None) -> dict[str, Any]:
+    """Return the JSON-RPC object answering ``want_id`` from an SSE or plain response body.
+
+    A stream carries progress notifications and, on a reused connection, frames belonging to
+    other requests. Taking the first id-bearing frame meant another request's answer could be
+    read as this one's -- on a create, that attributes someone else's media_buy_id to this
+    buy. When ``want_id`` is given, only a frame carrying that id is accepted.
+    """
+    frames: list[dict[str, Any]] = []
     for line in text.splitlines():
         if line.startswith("data: "):
             try:
                 obj = json.loads(line[6:])
-                if isinstance(obj, dict) and ("result" in obj or "error" in obj or "id" in obj):
-                    return obj
             except json.JSONDecodeError:
                 continue
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return {}
+            if isinstance(obj, dict) and ("result" in obj or "error" in obj or "id" in obj):
+                frames.append(obj)
+    if not frames:
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        frames = [obj] if isinstance(obj, dict) else []
+
+    if want_id is None:
+        return frames[0] if frames else {}
+    for obj in frames:
+        if obj.get("id") == want_id:
+            return obj
+    return {}
 
 
 class McpTransport:
@@ -39,6 +55,11 @@ class McpTransport:
         self.tenant = tenant
         self._client = httpx.Client(timeout=timeout, follow_redirects=True)
         self._session: str | None = None
+        #: The auth posture the cached session was minted under. A session established by an
+        #: authenticated initialize must not be reused for an unauthenticated call: the
+        #: server may authorize on session identity, so `authed=False` would silently ride
+        #: the authenticated session and an auth-boundary probe would read a false pass.
+        self._session_authed: bool | None = None
         self._next_id = 0
 
     @property
@@ -62,8 +83,9 @@ class McpTransport:
         return self._next_id
 
     def _ensure_session(self, *, authed: bool) -> None:
-        if self._session is not None:
+        if self._session is not None and self._session_authed == authed:
             return
+        self._session = None
         init = {
             "jsonrpc": "2.0",
             "id": self._rpc_id(),
@@ -76,6 +98,7 @@ class McpTransport:
         }
         resp = self._client.post(self._url, headers=self._headers(authed=authed), json=init)
         self._session = resp.headers.get("mcp-session-id")
+        self._session_authed = authed if self._session else None
         if self._session:
             self._client.post(
                 self._url,
@@ -86,14 +109,20 @@ class McpTransport:
     def call(self, op: str, body: dict[str, Any] | None = None, *, authed: bool = True) -> Exchange:
         body = dict(body or {})
         self._ensure_session(authed=authed)
+        rpc_id = self._rpc_id()
         req = {
             "jsonrpc": "2.0",
-            "id": self._rpc_id(),
+            "id": rpc_id,
             "method": "tools/call",
             "params": {"name": op, "arguments": body},
         }
         resp = self._client.post(self._url, headers=self._headers(authed=authed), json=req)
-        rpc = _parse_sse(resp.text)
+        rpc = _parse_sse(resp.text, want_id=rpc_id)
+        if resp.status_code >= 400:
+            # The session (if any) may be gone; force a fresh initialize next time rather
+            # than replaying a dead mcp-session-id forever.
+            self._session = None
+            self._session_authed = None
 
         # No JSON-RPC frame at all (401 HTML, 502 from a proxy, "Missing session ID", an
         # empty body). Classifying this as anything but UNCLASSIFIED is how a failed
@@ -106,7 +135,9 @@ class McpTransport:
                 status_code=resp.status_code,
                 idempotency_key=body.get("idempotency_key"),
                 raw_body=resp.text[:8000],
-                unclassified_reason="no JSON-RPC frame in the response body",
+                unclassified_reason=(
+                    f"no JSON-RPC frame answering request id {rpc_id} in the response body"
+                ),
             )
         result = rpc.get("result") or {}
 

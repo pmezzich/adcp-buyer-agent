@@ -34,17 +34,38 @@ def _rest(handler):
 
 def _mcp(handler):
     t = _wire(McpTransport("http://seller", "tok", "ten"), handler)
-    t._session = "sess-1"  # skip the initialize handshake; these cases are about tools/call
+    # Skip the initialize handshake; these cases are about tools/call. _session_authed must
+    # match, or the transport (correctly) re-initializes for a different auth posture.
+    t._session = "sess-1"
+    t._session_authed = True
     return t
+
+
+def _echo(build):
+    """Wrap a stub so its JSON-RPC frame answers the id the transport actually minted.
+
+    Hardcoding an id here would make every case depend on the transport's internal counter,
+    and would quietly defeat the id-correlation the transport now does.
+    """
+
+    def handler(request):
+        import json as _json
+
+        rpc_id = _json.loads(request.content).get("id")
+        return build(rpc_id)
+
+    return handler
 
 
 def _a2a(handler):
     return _wire(A2aTransport("http://seller", "tok", "ten"), handler)
 
 
-def _rpc_ok(payload: dict) -> httpx.Response:
-    return httpx.Response(
-        200, json={"jsonrpc": "2.0", "id": 1, "result": {"structuredContent": payload}}
+def _rpc_ok(payload: dict):
+    return _echo(
+        lambda i: httpx.Response(
+            200, json={"jsonrpc": "2.0", "id": i, "result": {"structuredContent": payload}}
+        )
     )
 
 
@@ -107,18 +128,27 @@ def test_rest_200_with_unparseable_body_is_indeterminate():
 
 
 def test_mcp_structured_content_is_success():
-    ex = _mcp(lambda r: _rpc_ok({"products": []})).call("get_products", {})
+    ex = _mcp(_rpc_ok({"products": []})).call("get_products", {})
     assert (ex.is_success, ex.is_error, ex.is_indeterminate) == (True, False, False)
 
 
 def test_mcp_is_error_envelope_is_error():
     env = {"adcp_error": {"code": "VALIDATION_ERROR"}, "errors": []}
-    resp = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "result": {"isError": True, "content": [{"type": "text", "text": json.dumps(env)}]},
-    }
-    ex = _mcp(lambda r: httpx.Response(200, json=resp)).call("get_products", {})
+    ex = _mcp(
+        _echo(
+            lambda i: httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": i,
+                    "result": {
+                        "isError": True,
+                        "content": [{"type": "text", "text": json.dumps(env)}],
+                    },
+                },
+            )
+        )
+    ).call("get_products", {})
     assert ex.is_error is True and ex.error_code == "VALIDATION_ERROR"
 
 
@@ -139,8 +169,18 @@ def test_mcp_response_without_a_jsonrpc_frame_is_never_success(status, text):
 
 
 def test_mcp_result_with_no_readable_payload_is_indeterminate():
-    resp = {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "image", "data": "x"}]}}
-    ex = _mcp(lambda r: httpx.Response(200, json=resp)).call("get_products", {})
+    ex = _mcp(
+        _echo(
+            lambda i: httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": i,
+                    "result": {"content": [{"type": "image", "data": "x"}]},
+                },
+            )
+        )
+    ).call("get_products", {})
     assert (ex.is_success, ex.is_error, ex.is_indeterminate) == (False, False, True)
 
 

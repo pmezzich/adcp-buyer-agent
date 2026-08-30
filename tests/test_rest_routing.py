@@ -25,7 +25,10 @@ def _capture():
         return httpx.Response(200, json={"ok": True})
 
     t = RestTransport("http://seller", "tok", "ten")
-    t._client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+    t._client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=t._client.follow_redirects,  # inherit, never restate
+    )
     return t, seen
 
 
@@ -100,7 +103,14 @@ def test_a_redirect_is_recorded_as_an_error_not_followed():
         return httpx.Response(200, text="<!doctype html><title>Log In</title>")
 
     t = RestTransport("http://seller", "tok", "ten")
-    t._client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+    assert t._client.follow_redirects is False, (
+        "the transport must not follow redirects: httpx re-issues a followed 302 on POST as "
+        "a GET, so a failed money POST comes back as a 200 with another page's body"
+    )
+    t._client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=t._client.follow_redirects,
+    )
 
     ex = t.call("create_media_buy", {"idempotency_key": "k"})
     assert hops == [("POST", "/api/v1/media-buys")], f"the redirect was followed: {hops}"

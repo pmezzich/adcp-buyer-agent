@@ -85,7 +85,12 @@ class A2aTransport:
 
         task = rpc.get("result") or {}
         task_state = ((task.get("status") or {}).get("state")) if isinstance(task, dict) else None
+        parts = _data_parts(task) if isinstance(task, dict) else []
         payload = _extract_data_part(task)
+        # Recorded so a multi-artifact response is visible rather than silently collapsed.
+        meta: dict[str, Any] = {"artifact_count": len(parts)}
+        if task_state:
+            meta["task_state"] = task_state
         if isinstance(payload, dict) and "adcp_error" in payload:
             return Exchange(
                 op=op,
@@ -95,7 +100,7 @@ class A2aTransport:
                 wire_error_envelope=payload,
                 idempotency_key=body.get("idempotency_key"),
                 raw_body=resp.text[:8000],
-                extra={"task_state": task_state} if task_state else {},
+                extra=meta,
             )
         if not isinstance(payload, dict):
             # A Task with no readable DataPart is NOT a success. The seller's manual-approval
@@ -113,7 +118,7 @@ class A2aTransport:
                     if task_state
                     else "Task carried no data part"
                 ),
-                extra={"task_state": task_state} if task_state else {},
+                extra=meta,
             )
         return Exchange(
             op=op,
@@ -123,18 +128,34 @@ class A2aTransport:
             wire_response=payload,
             idempotency_key=body.get("idempotency_key"),
             raw_body=resp.text[:8000],
-            extra={"task_state": task_state} if task_state else {},
+            extra=meta,
         )
 
     def close(self) -> None:
         self._client.close()
 
 
-def _extract_data_part(result: dict[str, Any]) -> Any:
-    """Pull the structured DataPart out of a Task's latest artifact."""
+def _data_parts(result: dict[str, Any]) -> list[Any]:
+    """Every structured DataPart in the Task, in artifact order."""
+    out = []
     for artifact in result.get("artifacts") or []:
         for part in artifact.get("parts") or []:
             # A2A DataParts arrive as {kind:'data', data:{...}} or a bare {data:{...}}
             if "data" in part and part.get("kind", "data") == "data":
-                return part["data"]
-    return None
+                out.append(part["data"])
+    return out
+
+
+def _extract_data_part(result: dict[str, Any]) -> Any:
+    """The authoritative DataPart of a Task: an error envelope if there is one, else the first.
+
+    The seller appends one artifact per skill result in invocation order, so a task can carry
+    a success payload AND an error envelope. Returning the first match made every error
+    artifact after a success unreachable, and a FAILED task reported success. An envelope
+    anywhere in the task is the answer.
+    """
+    parts = _data_parts(result)
+    for data in parts:
+        if isinstance(data, dict) and "adcp_error" in data:
+            return data
+    return parts[0] if parts else None
