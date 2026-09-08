@@ -4,6 +4,8 @@ The durable/integration behavior (DBOS exactly-once against a live seller) is ex
 by scripts/run_create_media_buy.py; these cover the deterministic pieces with no infra.
 """
 
+from typing import ClassVar
+
 import pytest
 from adcp.server.idempotency import canonical_json_sha256
 
@@ -137,7 +139,10 @@ class TestIdempotencyKeyIdentity:
     belongs to the caller.
     """
 
-    PLAN = {"brand": {"domain": "x.com"}, "packages": [{"product_id": "p1", "budget": 5.0}]}
+    PLAN: ClassVar[dict] = {
+        "brand": {"domain": "x.com"},
+        "packages": [{"product_id": "p1", "budget": 5.0}],
+    }
 
     def test_the_default_makes_a_retry_of_one_plan_replay(self):
         assert jcs_key(self.PLAN) == jcs_key(dict(self.PLAN))
