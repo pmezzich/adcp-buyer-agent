@@ -128,3 +128,49 @@ A hand-run differential over 16 cases × 3 wires found 5 divergences; the other 
 `INVALID_REQUEST` vs `VALIDATION_ERROR` split for one cause (#1984), and MCP validating the
 payload *before* checking auth, so an unauthenticated caller learns the schema requirements.
 That last one is unconfirmed against the seller's source and is not written up.
+
+
+---
+
+## F4 — a creative missing `assets` is per-item on A2A/REST and whole-request on MCP
+
+**Status: appears unfiled.** #2011 names this exact contract for A2A and was fixed there by
+#1802; MCP was not in its scope and still diverges.
+
+Measured on the live seller (`fd90b69a`, e2e stack, tenant `ci-test`), one creative carrying a
+REGISTERED format (`display_970x250_html`) and no `assets` map:
+
+| transport | outcome |
+|---|---|
+| A2A | HTTP 200, request accepted, `creatives[0].action = "failed"` |
+| REST | HTTP 200, request accepted, `creatives[0].action = "failed"` |
+| MCP | **whole request rejected** — `VALIDATION_ERROR: "Field required"` |
+
+#2011 states the contract plainly: *"A creative with no assets, or no `format_id`, is a
+per-creative failure in the AdCP contract: `_sync_creatives_impl` returns `action='failed'` for
+that entry and the request succeeds overall."* It filed that as a defect **against A2A**, where
+`CreativeAsset(**c)` raised at the boundary. #1802 removed that construction, and the three
+cases #2011 names (`test_no_format_action_failed`, `test_no_preview_no_url_fails`,
+`test_generative_no_gemini_key_fails`) now pass on a2a — 12 passed, no xpass, verified this run.
+The three xfails still in that file are unrelated ("Async lifecycle not implemented").
+
+MCP does the same thing A2A used to: its typed wrapper requires the field, so the request never
+reaches `_sync_creatives_impl` and no per-item verdict is produced. Nothing tests it —
+`grep` for a missing-assets case in `tests/integration/test_creative_sync_transport.py` returns
+nothing.
+
+**Why this matters beyond symmetry.** A batch is best-effort per item, so a buyer sending five
+creatives where one lacks assets should get four synced and one `failed`. On MCP it gets a
+whole-request rejection instead.
+
+**[inferred, not measured]** — that consequence could not be demonstrated on this stack. Every
+creative sync here fails at the creative-agent hop with `CONFIGURATION_ERROR: "The configured
+endpoint for the creative agent is not reachable under this deployment's egress policy"`, so no
+creative syncs regardless of shape. The MCP/A2A/REST divergence above IS measured, because it
+happens at the request-shape boundary before that hop — MCP rejects without ever reaching it.
+
+**Relationship to #1671.** That PR proposed the opposite: making A2A refuse at the request level
+for this shape. #2011 shows request-level was the bug and per-item is the contract, so the PR
+was pinning the defect as correct behaviour. Its A2A change and the 77-line test asserting it
+were removed during the upstream catch-up. The residue is that MCP still behaves the way #1671
+wanted A2A to.
