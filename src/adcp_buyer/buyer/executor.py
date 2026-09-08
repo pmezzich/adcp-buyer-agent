@@ -31,7 +31,7 @@ from typing import Any
 from dbos import DBOS, SetWorkflowID
 
 from adcp_buyer.buyer.dbos_app import get_transport
-from adcp_buyer.core.idempotency import jcs_key
+from adcp_buyer.core.idempotency import jcs_key, validate_key
 from adcp_buyer.core.result import Exchange
 
 logger = logging.getLogger(__name__)
@@ -96,14 +96,24 @@ def _next_workflow_id(key: str) -> str:
     )
 
 
-def create_media_buy(plan: dict[str, Any]) -> Exchange:
+def create_media_buy(plan: dict[str, Any], *, idempotency_key: str | None = None) -> Exchange:
     """Run a media buy durably. Two calls with the same logical plan collapse to one buy.
 
-    ``plan`` is the create_media_buy request WITHOUT an idempotency_key; the key is derived
-    from its canonical form (the same canonicalization the seller hashes, so our retry is
-    a replay to it) and sent on the wire.
+    ``plan`` is the create_media_buy request WITHOUT an idempotency_key. By DEFAULT the key is
+    derived from its canonical form — the same canonicalization the seller hashes — so a retry
+    of the same plan replays instead of double-booking, with no bookkeeping from the caller.
+
+    Pass ``idempotency_key`` to override that. The default answers "is this the same REQUEST?",
+    which is the right question for a retry and the WRONG one for a deliberate repeat: two
+    campaigns that are legitimately the same shape (a monthly re-run, two identical flights)
+    hash identically, so the seller replays and the caller receives one media buy while
+    believing it placed two — a silent under-buy. AdCP makes the key client-generated exactly
+    so that call belongs to the caller; supply a distinct key per intended buy.
+
+    The key is validated against the pinned format before anything is sent, so a malformed one
+    is a local error rather than a seller rejection mid-flight.
     """
-    key = jcs_key(plan)
+    key = validate_key(idempotency_key) if idempotency_key is not None else jcs_key(plan)
     body = {**plan, "idempotency_key": key}
     with SetWorkflowID(_next_workflow_id(key)):
         result = create_media_buy_workflow(body)

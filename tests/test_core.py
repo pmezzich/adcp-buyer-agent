@@ -4,6 +4,7 @@ The durable/integration behavior (DBOS exactly-once against a live seller) is ex
 by scripts/run_create_media_buy.py; these cover the deterministic pieces with no infra.
 """
 
+import pytest
 from adcp.server.idempotency import canonical_json_sha256
 
 from adcp_buyer.core.idempotency import canonical_payload, jcs_key
@@ -123,3 +124,45 @@ def test_exchange_roundtrips_through_dict():
         idempotency_key="k",
     )
     assert Exchange.from_dict(ex.to_dict()) == ex
+
+
+class TestIdempotencyKeyIdentity:
+    """Who decides that two calls are "the same operation".
+
+    Deriving the key from content answers "is this the same REQUEST?", which is right for a
+    retry and wrong for a deliberate repeat: two campaigns of legitimately the same shape (a
+    monthly re-run, two identical flights) hash identically, the seller replays, and the caller
+    gets ONE media buy while believing it placed two. A silent under-buy is the mirror of the
+    double-book the key exists to prevent. AdCP makes the key client-generated so that call
+    belongs to the caller.
+    """
+
+    PLAN = {"brand": {"domain": "x.com"}, "packages": [{"product_id": "p1", "budget": 5.0}]}
+
+    def test_the_default_makes_a_retry_of_one_plan_replay(self):
+        assert jcs_key(self.PLAN) == jcs_key(dict(self.PLAN))
+
+    def test_two_identical_plans_share_a_key_which_is_why_an_override_exists(self):
+        """The hazard, stated as a test so the override's reason cannot be forgotten."""
+        second_flight = dict(self.PLAN)
+        assert jcs_key(self.PLAN) == jcs_key(second_flight)
+
+    def test_distinct_supplied_keys_stay_distinct(self):
+        from adcp_buyer.core.idempotency import validate_key
+
+        a, b = validate_key("campaign-2026-09-a"), validate_key("campaign-2026-09-b")
+        assert a != b
+
+    def test_a_malformed_key_is_refused_locally_before_anything_is_sent(self):
+        from adcp_buyer.core.idempotency import InvalidIdempotencyKey, validate_key
+
+        for bad in ("short", "has spaces", "a" * 300, "no/slashes/allowed" + "x" * 10):
+            with pytest.raises(InvalidIdempotencyKey):
+                validate_key(bad)
+
+    def test_a_derived_key_satisfies_the_format_it_validates(self):
+        """The default path must produce a key the validator would accept -- otherwise the
+        two halves disagree and only the override is usable."""
+        from adcp_buyer.core.idempotency import validate_key
+
+        assert validate_key(jcs_key(self.PLAN))

@@ -141,3 +141,22 @@ def test_a_live_seller_still_supports_idempotency_replay():
 
     idem = (resp.json().get("adcp") or {}).get("idempotency") or {}
     assert idem.get("supported") is True, f"seller does not advertise idempotency: {idem}"
+
+
+def test_key_pattern_matches_the_shipped_schema():
+    """core/idempotency.py transcribes the key format because the SDK exposes the
+    canonicalizer but not the constraint. A transcription that nothing grades is a copy that
+    drifts, so grade it against the schema the pinned wheel actually ships.
+    """
+    import json
+
+    from adcp_buyer.core.idempotency import KEY_PATTERN
+
+    root = pathlib.Path(adcp.__file__).parent
+    hits = sorted(root.rglob("*sync-accounts-request*.json"))
+    assert hits, "pinned wheel ships no sync-accounts-request schema to grade against"
+    spec = json.loads(hits[0].read_text(encoding="utf-8"))["properties"]["idempotency_key"]
+
+    assert KEY_PATTERN.pattern == spec["pattern"], (
+        f"transcribed key pattern drifted from the pin: {KEY_PATTERN.pattern} != {spec['pattern']}"
+    )

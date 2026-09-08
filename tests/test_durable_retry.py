@@ -108,3 +108,75 @@ def test_a_failed_attempt_can_be_retried_once_the_seller_recovers():
         assert (result.wire_response or {}).get("media_buy_id")
     finally:
         dbos_app.DBOS.destroy()
+
+
+def test_a_supplied_key_produces_a_SECOND_media_buy_for_an_identical_plan():
+    """The override's whole reason, graded end to end.
+
+    Deriving the key from content answers "is this the same REQUEST?". For a deliberate repeat
+    -- a monthly re-run, two identical flights -- that is the wrong question: the plans hash
+    identically, the seller replays, and the caller receives one media buy while believing it
+    placed two. This asserts the caller can say otherwise.
+
+    It has to run through create_media_buy rather than the key helper: the defect this guards
+    is "the executor stopped honouring the argument", which a unit test of the validator cannot
+    see. That is why it lives here and needs the durable stack.
+    """
+    import uuid as _uuid
+
+    from adcp_buyer.buyer import dbos_app
+    from adcp_buyer.buyer.brief import CampaignBrief
+    from adcp_buyer.buyer.campaign import ensure_account
+    from adcp_buyer.buyer.executor import create_media_buy
+    from adcp_buyer.core.idempotency import jcs_key
+    from adcp_buyer.core.transports import make_transport
+
+    brief = CampaignBrief(
+        brand_domain=f"repeat-{_uuid.uuid4().hex[:10]}.com",
+        brief="premium display",
+        budget=4000.0,
+        max_cpm=30.0,
+        flight_end="2026-09-30T23:59:59Z",
+    )
+    probe = make_transport("rest", SELLER, TOKEN, TENANT)
+    try:
+        account_id = ensure_account(probe, brief)
+    finally:
+        probe.close()
+
+    plan = {
+        "brand": {"domain": brief.brand_domain},
+        "account": {"account_id": account_id},
+        "start_time": "asap",
+        "end_time": brief.flight_end,
+        "packages": [
+            {
+                "product_id": "prod_display_premium",
+                "budget": 4000.0,
+                "pricing_option_id": "cpm_usd_fixed",
+            }
+        ],
+    }
+
+    dbos_app.init_dbos(base_url=SELLER, token=TOKEN, tenant=TENANT, database_url=BUYER_DB)
+    try:
+        # Default: content-derived. A retry of the same plan replays.
+        first = create_media_buy(plan)
+        again = create_media_buy(plan)
+        assert first.is_success and again.is_success
+        id1 = (first.wire_response or {}).get("media_buy_id")
+        assert id1 == (again.wire_response or {}).get("media_buy_id"), (
+            "the default stopped collapsing a retry"
+        )
+
+        # Deliberate repeat: a distinct key must yield a DISTINCT buy.
+        deliberate = f"repeat-{_uuid.uuid4().hex}"
+        assert deliberate != jcs_key(plan)
+        second = create_media_buy(plan, idempotency_key=deliberate)
+        assert second.is_success, second.describe()
+        id2 = (second.wire_response or {}).get("media_buy_id")
+        assert id2 and id2 != id1, (
+            f"a deliberate second buy collapsed onto the first ({id1}) -- silent under-buy"
+        )
+    finally:
+        dbos_app.DBOS.destroy()

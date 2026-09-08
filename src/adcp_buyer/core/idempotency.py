@@ -23,11 +23,36 @@ A SHA-256 hex digest is 64 chars over [0-9a-f], which satisfies the spec's key f
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from adcp.server.idempotency import EXCLUDED_FIELDS, canonical_json_sha256, strip_excluded_fields
 
-__all__ = ["EXCLUDED_FIELDS", "canonical_payload", "jcs_key"]
+__all__ = ["EXCLUDED_FIELDS", "KEY_PATTERN", "canonical_payload", "jcs_key", "validate_key"]
+
+#: The pinned schema's own constraint on idempotency_key (minLength 16, maxLength 255,
+#: charset [A-Za-z0-9_.:-]). Transcribed rather than imported because the SDK exposes the
+#: canonicalizer but not the format; ``test_pins`` grades it against the shipped schema so a
+#: drift in the pin fails here rather than at the seller.
+KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{16,255}$")
+
+
+class InvalidIdempotencyKey(ValueError):
+    """A caller-supplied key the seller would reject. Raised before anything is sent."""
+
+
+def validate_key(key: str) -> str:
+    """Return ``key`` if it satisfies the pinned format, else raise.
+
+    Checked buyer-side so a malformed key is a local error with a useful message, rather than
+    a VALIDATION_ERROR from the seller on the money path.
+    """
+    if not isinstance(key, str) or not KEY_PATTERN.fullmatch(key):
+        raise InvalidIdempotencyKey(
+            f"idempotency_key must match {KEY_PATTERN.pattern} (16-255 chars over "
+            f"[A-Za-z0-9_.:-]); got {key!r}"
+        )
+    return key
 
 
 def canonical_payload(payload: dict[str, Any]) -> dict[str, Any]:

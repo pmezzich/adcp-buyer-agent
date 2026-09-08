@@ -123,3 +123,20 @@ def test_ensure_account_does_not_send_an_idempotency_key():
     ensure_account(stub, BRIEF)
     ((_, body),) = stub.calls
     assert "idempotency_key" not in body
+
+
+def test_a_malformed_supplied_idempotency_key_never_reaches_the_seller():
+    """Refused locally, so a bad key is a caller error rather than a money-path rejection.
+
+    Lives here rather than beside the durable tests because it needs no stack -- it raises
+    before any I/O -- and a module-level stack skipif would have made it dormant, which reads
+    exactly like passing.
+
+    It is also the executing half of the override's oracle: if create_media_buy stopped
+    honouring `idempotency_key` and fell back to the content-derived key, this stops raising.
+    """
+    from adcp_buyer.buyer.executor import create_media_buy
+    from adcp_buyer.core.idempotency import InvalidIdempotencyKey
+
+    with pytest.raises(InvalidIdempotencyKey):
+        create_media_buy({"brand": {"domain": "x.com"}}, idempotency_key="too-short")
